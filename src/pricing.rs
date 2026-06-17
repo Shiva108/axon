@@ -31,6 +31,13 @@ pub struct ModelRates {
     pub cache_write_1h: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CreditRates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 struct LocalSection {
     #[serde(default)]
@@ -100,6 +107,25 @@ impl Pricing {
             + per_m(b.cache_write_5m, r.cache_write_5m)
             + per_m(b.cache_write_1h, r.cache_write_1h);
         (raw * self.fx_to_display.unwrap_or(1.0), false)
+    }
+
+    pub fn chatgpt_credit_rates(&self, model: &str) -> Option<CreditRates> {
+        match model {
+            "gpt-5.4" => Some(CreditRates {
+                input: 62.50,
+                cache_read: 6.25,
+                output: 375.0,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn chatgpt_credits(&self, model: &str, b: &Buckets) -> Option<f64> {
+        let r = self.chatgpt_credit_rates(model)?;
+        let per_m = |tokens: u64, rate: f64| (tokens as f64) * rate / 1_000_000.0;
+        Some(
+            per_m(b.input, r.input) + per_m(b.output, r.output) + per_m(b.cache_read, r.cache_read),
+        )
     }
 }
 
@@ -181,5 +207,25 @@ cache_write_1h = 0.0
         );
         assert_eq!(cost, 0.0);
         assert!(!unpriced);
+    }
+
+    #[test]
+    fn chatgpt_credits_for_gpt_5_4() {
+        let p = Pricing::bundled();
+        let credits = p
+            .chatgpt_credits(
+                "gpt-5.4",
+                &Buckets {
+                    input: 1_000_000,
+                    cache_read: 1_000_000,
+                    output: 1_000_000,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            (credits - (62.5 + 6.25 + 375.0)).abs() < 1e-9,
+            "got {credits}"
+        );
     }
 }
