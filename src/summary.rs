@@ -16,6 +16,8 @@ pub struct ModelStat {
     pub events: u64,
     pub tokens_in: u64,
     pub tokens_out: u64,
+    pub money_tokens_out: u64,
+    pub credit_tokens_out: u64,
     pub cost_eur: f64,
     pub cost_credits: Option<f64>,
     pub pricing_kind: String,
@@ -176,6 +178,8 @@ pub fn build_summary<'a>(events: impl IntoIterator<Item = &'a Event>) -> Summary
             events: 0,
             tokens_in: 0,
             tokens_out: 0,
+            money_tokens_out: 0,
+            credit_tokens_out: 0,
             cost_eur: 0.0,
             cost_credits: None,
             pricing_kind: e.pricing_kind.as_str().to_string(),
@@ -187,6 +191,15 @@ pub fn build_summary<'a>(events: impl IntoIterator<Item = &'a Event>) -> Summary
         m.cost_eur += e.cost_eur;
         m.cost_credits = Some(m.cost_credits.unwrap_or(0.0) + e.cost_credits.unwrap_or(0.0))
             .filter(|v| *v > 0.0);
+        match e.pricing_kind {
+            PricingKind::ApiMoney | PricingKind::ReportedCost if e.cost_eur > 0.0 => {
+                m.money_tokens_out += e.tokens_out;
+            }
+            PricingKind::ChatgptIncluded if e.cost_credits.unwrap_or(0.0) > 0.0 => {
+                m.credit_tokens_out += e.tokens_out;
+            }
+            _ => {}
+        }
         if m.pricing_kind != e.pricing_kind.as_str() {
             m.pricing_kind = "mixed".to_string();
         }
@@ -277,4 +290,95 @@ pub fn windowed_cost(events: &[Event], since_ms: i64) -> f64 {
         .filter(|e| e.ts >= since_ms)
         .map(|e| e.cost_eur)
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::{Event, Harness, PricingKind};
+
+    use super::build_summary;
+
+    fn event(
+        model: &str,
+        pricing_kind: PricingKind,
+        tokens_in: u64,
+        tokens_out: u64,
+        cost_eur: f64,
+        cost_credits: Option<f64>,
+    ) -> Event {
+        Event {
+            id: format!("{model}-{tokens_in}-{tokens_out}-{}", pricing_kind.as_str()),
+            ts: 0,
+            harness: Harness::Codex,
+            project: "/repo".to_string(),
+            agent: "main".to_string(),
+            is_subagent: false,
+            model: model.to_string(),
+            session_id: "s".to_string(),
+            tokens_in,
+            tokens_out,
+            cache_read: 0,
+            cache_write_5m: 0,
+            cache_write_1h: 0,
+            duration_ms: None,
+            loc_added: 0,
+            loc_removed: 0,
+            loc_failed: false,
+            skills: Vec::new(),
+            cost_eur,
+            cost_credits,
+            pricing_kind,
+            unpriced: false,
+        }
+    }
+
+    #[test]
+    fn bucketed_model_output_totals_track_pricing_mode() {
+        let events = vec![
+            event(
+                "gpt-5.4",
+                PricingKind::ChatgptIncluded,
+                1000,
+                500,
+                0.0,
+                Some(12.5),
+            ),
+            event("gpt-5.4", PricingKind::ApiMoney, 1000, 200, 4.0, None),
+            event(
+                "gpt-5.3-codex-spark",
+                PricingKind::ChatgptPreview,
+                1000,
+                300,
+                0.0,
+                None,
+            ),
+            event("llama-local", PricingKind::LocalFree, 1000, 250, 0.0, None),
+            event("gpt-5.5", PricingKind::ReportedCost, 1000, 1000, 8.0, None),
+        ];
+
+        let s = build_summary(&events);
+        let gpt54 = s.by_model.iter().find(|m| m.model == "gpt-5.4").unwrap();
+        assert_eq!(gpt54.money_tokens_out, 200);
+        assert_eq!(gpt54.credit_tokens_out, 500);
+
+        let spark = s
+            .by_model
+            .iter()
+            .find(|m| m.model == "gpt-5.3-codex-spark")
+            .unwrap();
+        assert_eq!(spark.money_tokens_out, 0);
+        assert_eq!(spark.credit_tokens_out, 0);
+
+        let local = s
+            .by_model
+            .iter()
+            .find(|m| m.model == "llama-local")
+            .unwrap();
+        assert_eq!(local.money_tokens_out, 0);
+        assert_eq!(local.credit_tokens_out, 0);
+
+        let gpt55 = s.by_model.iter().find(|m| m.model == "gpt-5.5").unwrap();
+        assert_eq!(gpt55.money_tokens_out, 1000);
+        assert_eq!(gpt55.credit_tokens_out, 0);
+    }
 }

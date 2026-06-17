@@ -272,6 +272,8 @@ const fmtEur = n => '€' + Number(n).toLocaleString('en-US', {minimumFractionDi
 const fmtCredits = n => Number(n).toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:2}) + ' cr';
 const pctFmt = v => v.toFixed(1) + '%';
 const fmtDur = ms => { if(ms==null) return '—'; if(ms<1000) return Math.round(ms)+'ms'; const s=ms/1000; if(s<60) return (s<10?s.toFixed(1):Math.round(s))+'s'; const m=Math.floor(s/60); return m+'m'+Math.round(s-m*60)+'s'; };
+const fmtRatio = n => Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) + 'x';
+const shortModel = s => String(s).replace('claude-','');
 function costLabel(eur, credits, kind){
   const hasEur = Number(eur || 0) > 0;
   const hasCredits = Number(credits || 0) > 0;
@@ -283,6 +285,34 @@ function costLabel(eur, credits, kind){
   }
   if (hasCredits && !hasEur) return fmtCredits(credits);
   return fmtEur(eur || 0);
+}
+function efficiencyCard(models){
+  let tokenBest=null, eurBest=null, creditBest=null;
+  (models||[]).forEach(m=>{
+    const tin=Number(m.tokens_in||0), tout=Number(m.tokens_out||0);
+    if(tin>0 && tout>0){
+      const ratio=tout/tin;
+      if(!tokenBest || ratio>tokenBest.ratio || (ratio===tokenBest.ratio && tout>tokenBest.tokens_out) || (ratio===tokenBest.ratio && tout===tokenBest.tokens_out && m.model < tokenBest.model)) tokenBest={model:m.model, ratio, tokens_out:tout};
+    }
+    const moneyOut=Number(m.money_tokens_out||0), eur=Number(m.cost_eur||0);
+    if(moneyOut>0 && eur>0){
+      const ppm=eur*1e6/moneyOut;
+      if(!eurBest || ppm<eurBest.ppm || (ppm===eurBest.ppm && m.model < eurBest.model)) eurBest={model:m.model, ppm};
+    }
+    const creditOut=Number(m.credit_tokens_out||0), credits=Number(m.cost_credits||0);
+    if(creditOut>0 && credits>0){
+      const ppm=credits*1e6/creditOut;
+      if(!creditBest || ppm<creditBest.ppm || (ppm===creditBest.ppm && m.model < creditBest.model)) creditBest={model:m.model, ppm};
+    }
+  });
+  const costParts=[];
+  if(eurBest) costParts.push('eur '+esc(shortModel(eurBest.model))+' '+fmtEur(eurBest.ppm)+' / 1M out');
+  if(creditBest) costParts.push('credits '+esc(shortModel(creditBest.model))+' '+Number(creditBest.ppm).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})+' cr / 1M out');
+  return {
+    name: tokenBest ? shortModel(tokenBest.model) : 'no eligible models',
+    sub: (tokenBest ? 'token: '+fmtRatio(tokenBest.ratio)+' out/in' : 'token: no eligible models') + '<br>' + (costParts.length ? 'cost: '+costParts.join(' · ') : 'cost: no comparable priced models'),
+    sig: [tokenBest&&tokenBest.model, tokenBest&&Math.round(tokenBest.ratio*1000), eurBest&&eurBest.model, eurBest&&Math.round(eurBest.ppm*100), creditBest&&creditBest.model, creditBest&&Math.round(creditBest.ppm*100)].join('|')
+  };
 }
 // Smooth number tweening: each registered element eases toward its target every frame.
 // New elements start at 0 (count-up intro); thereafter they glide between values.
@@ -329,7 +359,7 @@ const AX = {
     const maxM = Math.max.apply(null, M.map(m=>m[2]||1)) || 1, maxA = Math.max.apply(null, A.map(x=>x[2]||1)) || 1;
     const nodes = [];
     nodes.push({ id:0, kind:'core', fullName:'AXON core', label:'AXON', p:[0,0,0], r:17, lit:1, flash:0, tokens:fmtCompact(this.data?this.data.tokens_out:0), costNum:this.total, children:[] });
-    M.forEach((m,i)=>{ const d=this.fib(M.length,i); nodes.push({ id:nodes.length, kind:'model', fullName:m[0], label:m[0].replace('claude-',''), p:[d[0]*R1,d[1]*R1,d[2]*R1], r:7+9*Math.sqrt((m[2]||1)/maxM), lit:1, flash:0, tokens:fmtCompact(m[1]), costNum:m[2], costText:m[4], costKind:m[7], costCredits:m[6], children:[] }); });
+    M.forEach((m,i)=>{ const d=this.fib(M.length,i); nodes.push({ id:nodes.length, kind:'model', fullName:m[0], label:shortModel(m[0]), p:[d[0]*R1,d[1]*R1,d[2]*R1], r:7+9*Math.sqrt((m[2]||1)/maxM), lit:1, flash:0, tokens:fmtCompact(m[1]), costNum:m[2], costText:m[4], costKind:m[7], costCredits:m[6], children:[] }); });
     A.forEach((g,i)=>{ const d=this.fib(A.length,i); const pos=[d[0]*R2,d[1]*R2,d[2]*R2]; let best=1,bd=1e9;
       for(let k=1;k<=M.length;k++){ const n=nodes[k]; const dd=Math.hypot(n.p[0]-pos[0],n.p[1]-pos[1],n.p[2]-pos[2]); if(dd<bd){bd=dd;best=k;} }
       const id=nodes.length; nodes.push({ id, kind:'agent', fullName:g[0], label:g[0], p:pos, r:3.2+5.4*Math.sqrt((g[2]||1)/maxA), lit:1, flash:0, tokens:fmtCompact(g[1]), costNum:g[2], parent:best }); nodes[best].children.push(id); });
@@ -416,7 +446,7 @@ const AX = {
   harnessColor(h){ const A=this.A; return ({'claude-code':'rgb('+A.lighter+')','codex':'#4fd6e6','opencode':'#f5b13d'})[h] || 'rgb('+A.rgb+')'; },
   feedKey(e){ return e.ts+'|'+e.agent+'|'+e.model+'|'+e.tokens_out+'|'+(e.duration_ms||0); },
   feedRowEl(e, animate){ const d=document.createElement('div'); d.style.cssText='display:grid; grid-template-columns:74px 1fr 84px 78px 64px; gap:14px; align-items:center; padding:7px 8px; border-radius:7px; font-family:var(--mono); font-size:12.5px;'+(animate?' animation:axStreamIn .5s ease;':'');
-    const col=this.harnessColor(e.harness); const t=new Date(e.ts).toTimeString().slice(0,8); const model=esc(String(e.model).replace('claude-',''));
+    const col=this.harnessColor(e.harness); const t=new Date(e.ts).toTimeString().slice(0,8); const model=esc(shortModel(e.model));
     d.innerHTML='<span style="color:#46564e;">'+t+'</span>'
       +'<span style="display:flex; align-items:center; gap:7px; min-width:0;"><span style="width:6px; height:6px; border-radius:50%; background:'+col+'; box-shadow:0 0 7px '+col+'; flex:0 0 auto;"></span><span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#cfe3d8;">'+esc(e.agent)+' <span style="color:#5d7268;">&middot; '+model+'</span></span></span>'
       +'<span style="color:var(--ax2,#6ee7b7); text-align:right;">+'+fmtCompact(e.tokens_out)+'</span>'
@@ -499,11 +529,11 @@ const AX = {
     $('brainOut').textContent = fmtCompact(s.tokens_out)+' out · '+fmtInt(s.sessions)+' sessions';
 
     // hall of fame — rebuild only when the standings actually change
-    const topAgent=this.agentsData[0], busiestModel=this.modelsData.slice().sort((a,b)=>b[1]-a[1])[0], topHarness=harn[0];
-    const hofSig=[topAgent&&topAgent[0], topAgent&&Math.round(topAgent[2]), busiestModel&&busiestModel[0], busiestModel&&Math.round(busiestModel[1]/1e5), s.rtk&&Math.round(s.rtk.saved_pct), topHarness&&topHarness.harness, topHarness&&Math.round(topHarness.cost_eur)].join('|');
+    const topAgent=this.agentsData[0], busiestModel=this.modelsData.slice().sort((a,b)=>b[1]-a[1])[0], topHarness=harn[0], efficient=efficiencyCard(s.by_model||[]);
+    const hofSig=[topAgent&&topAgent[0], topAgent&&Math.round(topAgent[2]), busiestModel&&busiestModel[0], busiestModel&&Math.round(busiestModel[1]/1e5), efficient.sig, topHarness&&topHarness.harness, topHarness&&Math.round(topHarness.cost_eur)].join('|');
     this.gate('hof', hofSig, ()=>{
-      const card=(label,name,sub)=>'<div style="position:relative; padding:18px; border:1px solid rgba(var(--axr,52,211,153),0.14); border-radius:14px; background:linear-gradient(180deg,rgba(16,28,22,0.65),rgba(8,13,11,0.65)); overflow:hidden;"><div style="font-family:var(--mono); font-size:10px; letter-spacing:0.2em; color:#5d7268;">'+label+'</div><div style="font-family:var(--mono); font-weight:700; font-size:20px; color:#eafff4; margin:15px 0 7px; word-break:break-all;">'+esc(name)+'</div><div style="font-family:var(--mono); font-size:13px; color:var(--ax2,#6ee7b7);">'+sub+'</div></div>';
-      $('hof').innerHTML = card('♛ TOP EARNER', topAgent?topAgent[0]:'—', topAgent?fmtEur(topAgent[2])+' · '+(s.cost_eur?(topAgent[2]/s.cost_eur*100).toFixed(1):0)+'% of spend':'') + card('▲ BUSIEST MODEL', busiestModel?busiestModel[0].replace('claude-',''):'—', busiestModel?fmtCompact(busiestModel[1])+' tokens out':'') + card('❖ MOST EFFICIENT', s.rtk?'RTK proxy':'—', s.rtk?s.rtk.saved_pct.toFixed(1)+'% · '+fmtCompact(s.rtk.tokens_saved)+' saved':'') + card('◈ BUSIEST HARNESS', topHarness?topHarness.harness:'—', topHarness?fmtEur(topHarness.cost_eur)+' · '+fmtInt(topHarness.events)+' events':'');
+      const card=(label,name,sub)=>'<div style="position:relative; padding:18px; border:1px solid rgba(var(--axr,52,211,153),0.14); border-radius:14px; background:linear-gradient(180deg,rgba(16,28,22,0.65),rgba(8,13,11,0.65)); overflow:hidden;"><div style="font-family:var(--mono); font-size:10px; letter-spacing:0.2em; color:#5d7268;">'+label+'</div><div style="font-family:var(--mono); font-weight:700; font-size:20px; color:#eafff4; margin:15px 0 7px; word-break:break-all;">'+esc(name)+'</div><div style="font-family:var(--mono); font-size:13px; color:var(--ax2,#6ee7b7); line-height:1.55;">'+sub+'</div></div>';
+      $('hof').innerHTML = card('♛ TOP EARNER', topAgent?topAgent[0]:'—', topAgent?fmtEur(topAgent[2])+' · '+(s.cost_eur?(topAgent[2]/s.cost_eur*100).toFixed(1):0)+'% of spend':'') + card('▲ BUSIEST MODEL', busiestModel?shortModel(busiestModel[0]):'—', busiestModel?fmtCompact(busiestModel[1])+' tokens out':'') + card('❖ MOST EFFICIENT', efficient.name, efficient.sub) + card('◈ BUSIEST HARNESS', topHarness?topHarness.harness:'—', topHarness?fmtEur(topHarness.cost_eur)+' · '+fmtInt(topHarness.events)+' events':'');
     });
 
     this.updateBudget(s);
